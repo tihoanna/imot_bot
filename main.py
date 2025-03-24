@@ -2,7 +2,7 @@ import requests
 from bs4 import BeautifulSoup
 import time
 from keep_alive import keep_alive
-from datetime import datetime
+from datetime import datetime, timedelta
 import threading
 
 keep_alive()
@@ -16,8 +16,8 @@ URLS = [
 
 TELEGRAM_TOKEN = '7957617876:AAGo4nxyn2FlVRZPiFIrIw6EaqNlzF8G7Jo'
 TELEGRAM_CHAT_ID = '6290875129'
-
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
+
 seen_links = set()
 
 def send_telegram(message):
@@ -28,20 +28,39 @@ def send_telegram(message):
 def get_all_listings(base_url):
     listings = []
     page = 1
+    now = datetime.now()
+    threshold_time = now - timedelta(minutes=10)
+    today_str = now.strftime('%d.%m.%Y')
+
     while True:
         paged_url = f"{base_url}&p={page}"
         response = requests.get(paged_url, headers=HEADERS)
         soup = BeautifulSoup(response.text, 'html.parser')
-        titles = soup.select('td:nth-child(3) .bold')
-        links = soup.select('td:nth-child(3) .bold a')
+        rows = soup.select('tr.odd, tr.even')
 
-        if not titles or not links:
+        if not rows:
             break
 
-        for title, link in zip(titles, links):
-            href = link.get('href')
-            if href:
-                listings.append((title.text.strip(), href.strip()))
+        for row in rows:
+            title_tag = row.select_one('td:nth-child(3) .bold')
+            link_tag = row.select_one('td:nth-child(3) .bold a')
+            date_tag = row.select_one('td:nth-child(6)')
+
+            if not (title_tag and link_tag and date_tag):
+                continue
+
+            date_text = date_tag.get_text(strip=True)
+
+            try:
+                post_time = datetime.strptime(date_text, '%H:%M %d.%m.%Y')
+            except ValueError:
+                continue  # ако форматът не съвпада
+
+            if post_time.date() == now.date() and post_time >= threshold_time:
+                title = title_tag.get_text(strip=True)
+                link = link_tag.get('href')
+                if link:
+                    listings.append((title, link.strip()))
 
         page += 1
 
@@ -56,27 +75,24 @@ def check_new_listings():
                 new_listings.append((title, link))
 
     for title, link in new_listings:
-        send_telegram(f"🏠 Нова обява:\n{title}\nhttps:{link}")
+        send_telegram(f"🏠 Нова обява (до 10 минути):\n{title}\nhttps:{link}")
 
 def send_daily_status():
     while True:
         now = datetime.now()
         if now.hour == 10 and now.minute == 0:
             send_telegram("✅ Ботът е активен и няма проблеми.")
-            time.sleep(60)  # Изчаква 1 минута, за да не се дублира
+            time.sleep(60)
         time.sleep(30)
 
-# Стартово съобщение
+threading.Thread(target=send_daily_status, daemon=True).start()
+
 send_telegram("🚀 Ботът стартира успешно и е в готовност.")
 print("✅ Ботът стартира. Проверява на всеки 10 минути...")
 
-# Стартира нишка за ежедневно съобщение в 10:00
-threading.Thread(target=send_daily_status, daemon=True).start()
-
-# Основен безкраен цикъл
 while True:
     try:
         check_new_listings()
     except Exception as e:
         print("⚠️ Грешка:", e)
-    time.sleep(600)  # Изчаква 10 минути
+    time.sleep(600)
