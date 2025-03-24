@@ -3,6 +3,7 @@ from bs4 import BeautifulSoup
 import time
 from keep_alive import keep_alive
 from datetime import datetime
+import threading
 
 keep_alive()
 
@@ -17,15 +18,12 @@ TELEGRAM_TOKEN = '7957617876:AAGo4nxyn2FlVRZPiFIrIw6EaqNlzF8G7Jo'
 TELEGRAM_CHAT_ID = '6290875129'
 
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
-
 seen_links = set()
-
 
 def send_telegram(message):
     url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
     data = {'chat_id': TELEGRAM_CHAT_ID, 'text': message}
     requests.post(url, data=data)
-
 
 def get_all_listings(base_url):
     listings = []
@@ -49,7 +47,6 @@ def get_all_listings(base_url):
 
     return listings
 
-
 def check_new_listings():
     new_listings = []
     for url in URLS:
@@ -61,22 +58,25 @@ def check_new_listings():
     for title, link in new_listings:
         send_telegram(f"🏠 Нова обява:\n{title}\nhttps:{link}")
 
+def send_daily_status():
+    while True:
+        now = datetime.now()
+        if now.hour == 10 and now.minute == 0:
+            send_telegram("✅ Ботът е активен и няма проблеми.")
+            time.sleep(60)  # Изчаква 1 минута, за да не се дублира
+        time.sleep(30)
 
-def send_daily_ping():
-    now = datetime.now()
-    if now.hour == 10 and now.minute == 0:
-        send_telegram("✅ Ботът беше рестартиран и е активен :)")
-        time.sleep(60)
-
-
+# Стартово съобщение
 send_telegram("🚀 Ботът стартира успешно и е в готовност.")
-
 print("✅ Ботът стартира. Проверява на всеки 10 минути...")
 
+# Стартира нишка за ежедневно съобщение в 10:00
+threading.Thread(target=send_daily_status, daemon=True).start()
+
+# Основен безкраен цикъл
 while True:
     try:
         check_new_listings()
-        send_daily_ping()
     except Exception as e:
         print("⚠️ Грешка:", e)
-    time.sleep(600)
+    time.sleep(600)  # Изчаква 10 минути
