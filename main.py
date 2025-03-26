@@ -1,5 +1,6 @@
 import os
 import sys
+import re
 import requests
 from bs4 import BeautifulSoup
 import time
@@ -55,11 +56,11 @@ class ThreadSafeSet:
         with self._lock:
             return item in self._set
 
-# Инициализация
 seen_links = ThreadSafeSet()
 app = Flask(__name__)
 
-# Помощни функции
+# Telegram изпращане
+
 def send_telegram(message, retry=0):
     if not Config.TELEGRAM_TOKEN or not Config.TELEGRAM_CHAT_ID:
         logging.warning("Липсват Telegram credentials")
@@ -83,17 +84,22 @@ def send_telegram(message, retry=0):
         logging.error(f"Грешка при изпращане към Telegram: {e}")
         return False
 
+# Дата парсване и извличане
+
 def parse_date(date_str):
-    formats = [
-        '%H:%M %d %B, %Y',
-        '%H:%M на %d %B, %Y',
-        '%d.%m.%Y %H:%M',
-    ]
-    for fmt in formats:
-        try:
-            return datetime.strptime(date_str, fmt)
-        except ValueError:
-            continue
+    try:
+        match = re.search(r'(\d{2}):(\d{2})\s+на\s+(\d{2})\s+([а-яА-Я]+),\s+(\d{4})', date_str)
+        if match:
+            hour, minute, day, month_bg, year = match.groups()
+            bg_months = {
+                'януари': '01', 'февруари': '02', 'март': '03', 'април': '04',
+                'май': '05', 'юни': '06', 'юли': '07', 'август': '08',
+                'септември': '09', 'октомври': '10', 'ноември': '11', 'декември': '12'
+            }
+            month = bg_months.get(month_bg.lower(), '01')
+            return datetime.strptime(f"{day}.{month}.{year} {hour}:{minute}", "%d.%m.%Y %H:%M")
+    except Exception:
+        return None
     return None
 
 def extract_ad_info(ad_soup):
@@ -102,15 +108,16 @@ def extract_ad_info(ad_soup):
         title = title_tag.get_text(strip=True) if title_tag else "Без заглавие"
         price_tag = ad_soup.find(class_='price')
         price = price_tag.get_text(strip=True) if price_tag else "Не е посочена"
-        date = None
-        time_tag = ad_soup.find(string=lambda text: text and any(x in text for x in ["Публикувана", "Коригирана"]))
-        if time_tag:
-            date_text = time_tag.strip().split(' на ')[-1].split(' в ')[-1].replace(' г.', '').strip()
-            date = parse_date(date_text)
+
+        time_tag = ad_soup.find(string=lambda text: text and ("Публикувана" in text or "Коригирана" in text))
+        date = parse_date(time_tag) if time_tag else None
+
         return {'title': title, 'price': price, 'date': date}
     except Exception as e:
         logging.error(f"Грешка при извличане на информация: {e}")
         return None
+
+# Основна логика
 
 def fetch_with_retry(url, retry=0):
     try:
@@ -143,22 +150,26 @@ def check_listings():
                 break
 
             stop_processing = False
-
             for ad in ads:
                 link_tag = ad.select_one('td:nth-child(3) .bold a')
                 if not link_tag or 'href' not in link_tag.attrs:
                     continue
+
                 relative_link = link_tag['href']
                 full_link = f"https:{relative_link}"
+
                 if full_link in seen_links:
                     continue
+
                 ad_response = fetch_with_retry(full_link)
                 if not ad_response:
                     continue
+
                 ad_soup = BeautifulSoup(ad_response.text, 'html.parser')
                 ad_info = extract_ad_info(ad_soup)
                 if not ad_info or not ad_info['date']:
                     continue
+
                 if ad_info['date'].date() >= yesterday:
                     seen_links.add(full_link)
                     new_ads.append({
@@ -170,6 +181,7 @@ def check_listings():
                 else:
                     stop_processing = True
                     break
+
             if stop_processing:
                 break
             page += 1
@@ -180,67 +192,66 @@ def send_daily_status():
     while True:
         now = datetime.now()
         if now.hour == 10 and now.minute == 0:
-            status_msg = (
-                f"\U0001F4CA Статус доклад\n"
-                f"⏰ Дата: {now.strftime('%d.%m.%Y %H:%M')}\n"
-                f"🔍 Мониторинг на {len(Config.URLS)} URL-а\n"
-                f"💾 Запомнени обяви: {len(seen_links._set)}"
-            )
-            send_telegram(status_msg)
+            msg = f"✅ Ботът е активен\n{now.strftime('%d.%m.%Y %H:%M')}\nСледи {len(Config.URLS)} линка."
+            send_telegram(msg)
             time.sleep(60)
         time.sleep(30)
 
 @app.route('/')
 def home():
-    return "Имот мониторинг бот е активен"
+    return "Ботът е активен."
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    if request.json:
-        chat_id = request.json.get('message', {}).get('chat', {}).get('id')
-        text = request.json.get('message', {}).get('text', '').lower()
+    data = request.json
+    if data:
+        chat_id = data.get('message', {}).get('chat', {}).get('id')
+        text = data.get('message', {}).get('text', '').lower()
+
         if str(chat_id) == Config.TELEGRAM_CHAT_ID:
-            if text == '/status':
-                send_telegram(f"🟢 Ботът работи нормално\nПоследна проверка: {datetime.now().strftime('%H:%M %d.%m.%Y')}")
-            elif text == '/latest':
-                latest = list(seen_links._set)[-5:] if seen_links._set else []
-                if latest:
-                    send_telegram("Последни 5 запомнени обяви:\n" + "\n".join(latest))
+            if text == '/покажи':
+                new_ads = check_listings()
+                if not new_ads:
+                    send_telegram("Няма нови или редактирани обяви от днес и вчера.")
                 else:
-                    send_telegram("Няма запомнени обяви")
+                    for ad in new_ads:
+                        msg = f"🏠 <b>{ad['title']}</b>\n💰 {ad['price']}\n📅 {ad['date']}\n🔗 <a href='{ad['link']}'>Виж обявата</a>"
+                        send_telegram(msg)
     return 'OK'
 
 def run_flask():
     app.run(host='0.0.0.0', port=5000)
 
 def main():
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    status_thread = threading.Thread(target=send_daily_status, daemon=True)
-    status_thread.start()
-    send_telegram(f"🚀 Имот мониторинг бот стартира успешно!\nМониторинг на {len(Config.URLS)} източника")
+    threading.Thread(target=run_flask, daemon=True).start()
+    threading.Thread(target=send_daily_status, daemon=True).start()
+
+    send_telegram("🚀 Ботът стартира успешно и е в готовност.")
+    logging.info("Ботът стартира.")
+
     while True:
         try:
             new_ads = check_listings()
             for ad in new_ads:
-                message = (
-                    f"\U0001F3E0 <b>{ad['title']}</b>\n"
-                    f"\U0001F4B0 Цена: {ad['price']}\n"
-                    f"📅 {ad['date']}\n"
-                    f"🔗 <a href='{ad['link']}'>Линк към обявата</a>"
-                )
-                send_telegram(message)
+                msg = f"🏠 <b>{ad['title']}</b>\n💰 {ad['price']}\n📅 {ad['date']}\n🔗 <a href='{ad['link']}'>Виж обявата</a>"
+                send_telegram(msg)
             time.sleep(Config.CHECK_INTERVAL)
         except Exception as e:
             logging.critical(f"Критична грешка: {e}\n{traceback.format_exc()}")
-            send_telegram(f"❌ Критична грешка в основния цикъл: {e}")
+            send_telegram(f"❌ Критична грешка: {e}")
             time.sleep(60)
 
 if __name__ == '__main__':
     try:
         main()
     except KeyboardInterrupt:
-        send_telegram("🔴 Ботът е спрян ръчно")
+        send_telegram("🛑 Ботът е спрян.")
+        sys.exit(0)
+    except Exception as e:
+        logging.critical(f"Грешка при стартиране: {e}\n{traceback.format_exc()}")
+        send_telegram(f"🔴 Критична грешка при стартиране: {e}")
+        sys.exit(1)
+
         sys.exit(0)
     except Exception as e:
         send_telegram(f"🔴 Критична грешка при стартиране: {e}")
