@@ -1,4 +1,6 @@
-requests
-beautifulsoup4
-flask
-python-dotenv
+requests==2.31.0
+beautifulsoup4==4.12.3
+python-dotenv==1.0.0
+dateparser==1.1.8
+Flask==3.0.2
+gunicorn==21.2.0
