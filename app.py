@@ -15,9 +15,9 @@ import dateparser
 import random
 from urllib.parse import urljoin
 
-# Настройки за логване
+# Логване
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('imot_monitor.log', encoding='utf-8'),
@@ -25,7 +25,6 @@ logging.basicConfig(
     ]
 )
 
-# Зареждане на .env файл
 load_dotenv()
 
 class Config:
@@ -39,7 +38,7 @@ class Config:
         'https://www.imot.bg/pcgi/imot.cgi?act=3&slink=bv3nye&f1=1',
         'https://www.imot.bg/pcgi/imot.cgi?act=3&slink=bv3nz2&f1=1',
         'https://www.imot.bg/pcgi/imot.cgi?act=3&slink=bv3o1w&f1=1',
-        'https://www.imot.bg/pcgi/imot.cgi?act=5&adv=1j173986902339001'  # Тестова обява
+        'https://www.imot.bg/pcgi/imot.cgi?act=5&adv=1j173986902339001'  # тестова обява
     ]
     WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET')
     USER_AGENTS = [
@@ -80,7 +79,9 @@ app = Flask(__name__)
 
 def send_telegram(message, retry=0):
     if not Config.TELEGRAM_TOKEN or not Config.TELEGRAM_CHAT_ID:
+        logging.warning("Липсват Telegram credentials")
         return False
+
     try:
         url = f'https://api.telegram.org/bot{Config.TELEGRAM_TOKEN}/sendMessage'
         data = {
@@ -96,115 +97,119 @@ def send_telegram(message, retry=0):
         if retry < Config.MAX_RETRIES:
             time.sleep(2 ** retry)
             return send_telegram(message, retry+1)
-        logging.error(f"Telegram error: {e}")
+        logging.error(f"Грешка при изпращане към Telegram: {e}")
         return False
 
 def parse_date(date_str):
     try:
         if not date_str:
             return None
-        date_match = re.search(r'(\d{1,2}:\d{2})\s+на\s+(\d{1,2}\s+[а-яА-Я]+,\s+\d{4})', date_str)
-        if date_match:
-            return dateparser.parse(f"{date_match.group(1)} {date_match.group(2)}", languages=['bg'])
+        match = re.search(r'(\d{2}:\d{2})\s+на\s+(\d{1,2}\s+[а-я]+\s+\d{4})', date_str)
+        if match:
+            time_part, date_part = match.groups()
+            return dateparser.parse(f"{time_part} {date_part}", languages=['bg'])
         return dateparser.parse(date_str, languages=['bg'])
     except Exception as e:
-        logging.error(f"Parse date error: {e}")
+        logging.error(f"Грешка при парсване на дата: {e}")
         return None
 
-def extract_ad_info(soup):
+def extract_ad_info(ad_soup):
     try:
-        title = soup.find('h1').get_text(strip=True)
-        price_tag = soup.find(class_='price')
-        price = price_tag.get_text(strip=True) if price_tag else 'Няма цена'
-        info_div = soup.find('div', class_='info')
-        date_text = info_div.get_text(strip=True) if info_div else ''
-        date = parse_date(date_text)
-        return {'title': title, 'price': price, 'date': date}
+        title_elem = ad_soup.find('h1')
+        price_elem = ad_soup.find(class_=re.compile(r'price|amount', re.I))
+        date_elem = ad_soup.find(string=re.compile(r'Публикувана|Коригирана|Обновена', re.I))
+
+        return {
+            'title': title_elem.get_text(strip=True) if title_elem else "Без заглавие",
+            'price': price_elem.get_text(strip=True) if price_elem else "Не е посочена",
+            'date': parse_date(date_elem) if date_elem else None
+        }
     except Exception as e:
-        logging.error(f"Extract error: {e}")
+        logging.error(f"Грешка при извличане на информация: {e}")
         return None
 
 def fetch_with_retry(url, retry=0):
     try:
         headers = {
             'User-Agent': random.choice(Config.USER_AGENTS),
-            'Accept-Language': 'bg-BG,bg;q=0.9'
+            'Accept-Language': 'bg-BG,bg;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Referer': 'https://www.imot.bg/'
         }
         response = requests.get(url, headers=headers, timeout=Config.REQUEST_TIMEOUT)
         response.raise_for_status()
         return response
     except Exception as e:
         if retry < Config.MAX_RETRIES:
-            time.sleep(2 ** retry)
+            delay = 5 * (retry + 1)
+            logging.warning(f"Повторен опит {retry+1} за {url} след {delay} сек...")
+            time.sleep(delay)
             return fetch_with_retry(url, retry+1)
-        logging.error(f"Fetch error for {url}: {e}")
+        logging.error(f"Грешка при заявка към {url}: {e}")
         return None
 
-def process_url(url):
+def process_url(base_url):
     new_ads = []
-    response = fetch_with_retry(url)
-    if not response:
-        return new_ads
+    page = 1
+    max_pages = 5
 
-    soup = BeautifulSoup(response.text, 'html.parser')
-    ad_info = extract_ad_info(soup)
-    if ad_info and ad_info['date'] and (datetime.now() - ad_info['date']).days <= 5:
-        if url not in seen_links:
-            seen_links.add(url)
-            new_ads.append({
-                'title': ad_info['title'],
-                'price': ad_info['price'],
-                'link': url,
-                'date': ad_info['date'].strftime('%H:%M %d.%m.%Y')
-            })
+    while page <= max_pages:
+        url = f"{base_url}&p={page}" if page > 1 else base_url
+        response = fetch_with_retry(url)
+        if not response:
+            break
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+        ads = soup.select('table.tblOffers tr:has(a[href*="/p/"])')
+        if not ads:
+            break
+
+        for ad in ads:
+            try:
+                link_tag = ad.select_one('a[href*="/p/"]')
+                if not link_tag:
+                    continue
+                relative_link = link_tag['href']
+                full_link = urljoin('https://www.imot.bg', relative_link)
+
+                if full_link in seen_links:
+                    continue
+
+                ad_response = fetch_with_retry(full_link)
+                if not ad_response:
+                    continue
+
+                ad_soup = BeautifulSoup(ad_response.text, 'html.parser')
+                ad_info = extract_ad_info(ad_soup)
+
+                if ad_info and ad_info['date'] and (datetime.now() - ad_info['date']).days <= 2:
+                    seen_links.add(full_link)
+                    new_ads.append({
+                        'title': ad_info['title'],
+                        'price': ad_info['price'],
+                        'link': full_link,
+                        'date': ad_info['date'].strftime('%H:%M %d.%m.%Y')
+                    })
+            except Exception as e:
+                logging.error(f"Грешка при обработка на обява: {e}")
+
+        page += 1
+        time.sleep(random.uniform(1, 3))
+
     return new_ads
 
-def background_tasks():
-    while True:
-        now = datetime.now()
-        if now.hour == 10 and now.minute == 0:
-            send_telegram(f"✅ Ботът е активен\n🕓 {now.strftime('%d.%m.%Y %H:%M')}\n📝 Обяви: {len(seen_links._set)}")
-            seen_links.cleanup_old_entries()
-        time.sleep(60)
-
-@app.route('/')
-def home():
-    return 'IMOT.BG Monitor Active'
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    if request.headers.get('X-Telegram-Bot-Api-Secret-Token') != Config.WEBHOOK_SECRET:
-        return 'Unauthorized', 401
-    data = request.json
-    msg = data.get('message', {}).get('text', '').strip().lower()
-    if msg == '/status':
-        send_telegram(f"🔄 Статус: Активен\n📝 Обяви: {len(seen_links._set)}")
-    elif msg == '/latest':
-        last = seen_links.get_latest()
-        send_telegram("\n".join(last) if last else "❗ Няма запомнени обяви")
-    elif msg == '/checknow':
-        send_telegram("🔍 Ръчна проверка стартирана...")
-        for url in Config.URLS:
-            for ad in process_url(url):
-                send_telegram(f"🏠 <b>{ad['title']}</b>\n💰 {ad['price']}\n📅 {ad['date']}\n🔗 {ad['link']}")
-    return 'OK'
-
 def main():
-    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=5000, threaded=True), daemon=True).start()
-    threading.Thread(target=background_tasks, daemon=True).start()
-    send_telegram("🚀 Мониторингът започна успешно!")
-    while True:
-        try:
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                results = executor.map(process_url, Config.URLS)
-                for ads in results:
-                    for ad in ads:
-                        send_telegram(f"🏠 <b>{ad['title']}</b>\n💰 {ad['price']}\n📅 {ad['date']}\n🔗 {ad['link']}")
-            time.sleep(Config.CHECK_INTERVAL)
-        except Exception as e:
-            logging.critical(f"Грешка: {e}\n{traceback.format_exc()}")
-            send_telegram(f"❌ Грешка: {str(e)}")
-            time.sleep(60)
+    send_telegram("\uD83D\uDE80 Тестова проверка стартира.")
+    with ThreadPoolExecutor(max_workers=len(Config.URLS)) as executor:
+        results = executor.map(process_url, Config.URLS)
+        for ads in results:
+            for ad in ads:
+                msg = (
+                    f"\ud83c\udfe0 <b>{ad['title']}</b>\n"
+                    f"\ud83d\udcb0 {ad['price']}\n"
+                    f"\ud83d\uddd3 {ad['date']}\n"
+                    f"\ud83d\udd17 <a href='{ad['link']}'>Виж обявата</a>"
+                )
+                send_telegram(msg)
 
 if __name__ == '__main__':
     main()
