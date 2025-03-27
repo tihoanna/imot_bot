@@ -37,8 +37,7 @@ class Config:
         'https://www.imot.bg/pcgi/imot.cgi?act=3&slink=bv3nqa&f1=1',
         'https://www.imot.bg/pcgi/imot.cgi?act=3&slink=bv3nye&f1=1',
         'https://www.imot.bg/pcgi/imot.cgi?act=3&slink=bv3nz2&f1=1',
-        'https://www.imot.bg/pcgi/imot.cgi?act=3&slink=bv3o1w&f1=1',
-        'https://www.imot.bg/pcgi/imot.cgi?act=5&adv=1j173986902339001'  # тестова обява
+        'https://www.imot.bg/pcgi/imot.cgi?act=3&slink=bv3o1w&f1=1'
     ]
     WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET')
     USER_AGENTS = [
@@ -197,8 +196,56 @@ def process_url(base_url):
 
     return new_ads
 
+def background_tasks():
+    while True:
+        try:
+            now = datetime.now()
+            if now.hour == 10 and now.minute == 0:
+                status_msg = (
+                    f"✅ Ботът е активен\n"
+                    f"⌛ Последна проверка: {now.strftime('%d.%m.%Y %H:%M')}\n"
+                    f"🔍 Следи {len(Config.URLS)} линка\n"
+                    f"📝 Запомнени обяви: {len(seen_links._set)}"
+                )
+                send_telegram(status_msg)
+                seen_links.cleanup_old_entries()
+            time.sleep(60)
+        except Exception as e:
+            logging.error(f"Грешка във фонов процес: {e}")
+            time.sleep(300)
+
+@app.route('/')
+def home():
+    return "IMOT.BG Monitor Active"
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    if request.headers.get('X-Telegram-Bot-Api-Secret-Token') != Config.WEBHOOK_SECRET:
+        return 'Unauthorized', 401
+
+    data = request.json
+    message = data.get('message', {}).get('text', '').strip().lower()
+
+    if message == '/status':
+        send_telegram("✅ Ботът е активен и webhook работи!")
+    return 'OK'
+
 def main():
-    send_telegram("\u2708\ufe0f Ботът стартира успешно!")
+    flask_thread = threading.Thread(
+        target=lambda: app.run(
+            host='0.0.0.0',
+            port=10000,
+            threaded=True,
+            use_reloader=False
+        ),
+        daemon=True
+    )
+    flask_thread.start()
+
+    threading.Thread(target=background_tasks, daemon=True).start()
+    send_telegram("🚀 Мониторингът започна успешно!")
+    logging.info("Ботът стартира")
+
     while True:
         try:
             with ThreadPoolExecutor(max_workers=min(4, len(Config.URLS))) as executor:
@@ -206,19 +253,19 @@ def main():
                 for ads in results:
                     for ad in ads:
                         msg = (
-                            f"\ud83c\udfe0 <b>{ad['title']}</b>\n"
-                            f"\ud83d\udcb0 {ad['price']}\n"
-                            f"\ud83d\udcc5 {ad['date']}\n"
-                            f"\ud83d\udd17 <a href='{ad['link']}'>Виж обявата</a>"
+                            f"🏠 <b>{ad['title']}</b>\n"
+                            f"💰 {ad['price']}\n"
+                            f"📅 {ad['date']}\n"
+                            f"🔗 <a href='{ad['link']}'>Виж обявата</a>"
                         )
                         send_telegram(msg)
             time.sleep(Config.CHECK_INTERVAL)
         except KeyboardInterrupt:
-            send_telegram("\ud83d\uded1 Ботът е спрян ръчно")
+            send_telegram("🛑 Ботът е спрян ръчно")
             sys.exit(0)
         except Exception as e:
             logging.critical(f"Критична грешка: {e}\n{traceback.format_exc()}")
-            send_telegram(f"\u274c Критична грешка: {str(e)}")
+            send_telegram(f"❌ Критична грешка: {str(e)}")
             time.sleep(60)
 
 if __name__ == '__main__':
