@@ -33,12 +33,7 @@ class Config:
     CHECK_INTERVAL = 600
     MAX_RETRIES = 3
     REQUEST_TIMEOUT = 30
-    URLS = [
-        'https://www.imot.bg/pcgi/imot.cgi?act=3&slink=bv3nqa&f1=1',
-        'https://www.imot.bg/pcgi/imot.cgi?act=3&slink=bv3nye&f1=1',
-        'https://www.imot.bg/pcgi/imot.cgi?act=3&slink=bv3nz2&f1=1',
-        'https://www.imot.bg/pcgi/imot.cgi?act=3&slink=bv3o1w&f1=1'
-    ]
+    URLS = os.getenv('URLS', '').split(',') if os.getenv('URLS') else []
     WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET')
     USER_AGENTS = [
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -76,6 +71,7 @@ class ThreadSafeSet:
 seen_links = ThreadSafeSet()
 app = Flask(__name__)
 
+
 def send_telegram(message, retry=0):
     if not Config.TELEGRAM_TOKEN or not Config.TELEGRAM_CHAT_ID:
         logging.warning("Липсват Telegram credentials")
@@ -99,6 +95,7 @@ def send_telegram(message, retry=0):
         logging.error(f"Грешка при изпращане към Telegram: {e}")
         return False
 
+
 def parse_date(date_str):
     try:
         if not date_str:
@@ -111,6 +108,7 @@ def parse_date(date_str):
     except Exception as e:
         logging.error(f"Грешка при парсване на дата: {e}")
         return None
+
 
 def extract_ad_info(ad_soup):
     try:
@@ -126,6 +124,7 @@ def extract_ad_info(ad_soup):
     except Exception as e:
         logging.error(f"Грешка при извличане на информация: {e}")
         return None
+
 
 def fetch_with_retry(url, retry=0):
     try:
@@ -145,6 +144,7 @@ def fetch_with_retry(url, retry=0):
             return fetch_with_retry(url, retry+1)
         logging.error(f"Грешка при заявка към {url}: {e}")
         return None
+
 
 def process_url(base_url):
     new_ads = []
@@ -196,6 +196,7 @@ def process_url(base_url):
 
     return new_ads
 
+
 def background_tasks():
     while True:
         try:
@@ -214,9 +215,11 @@ def background_tasks():
             logging.error(f"Грешка във фонов процес: {e}")
             time.sleep(300)
 
+
 @app.route('/')
 def home():
     return "IMOT.BG Monitor Active"
+
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -227,8 +230,41 @@ def webhook():
     message = data.get('message', {}).get('text', '').strip().lower()
 
     if message == '/status':
-        send_telegram("✅ Ботът е активен и webhook работи!")
+        status_msg = (
+            f"🔄 Статус: Активен\n"
+            f"⌛ Последна проверка: {datetime.now().strftime('%H:%M %d.%m.%Y')}\n"
+            f"🔍 Следи {len(Config.URLS)} линка\n"
+            f"📝 Запомнени обяви: {len(seen_links._set)}"
+        )
+        send_telegram(status_msg)
+
+    elif message == '/latest':
+        latest = seen_links.get_latest(5)
+        if latest:
+            response = "Последни 5 запомнени обяви:\n" + "\n".join(f"{i+1}. {link}" for i, link in enumerate(latest))
+        else:
+            response = "Все още няма запомнени обяви."
+        send_telegram(response)
+
+    elif message == '/checknow':
+        send_telegram("⏳ Започвам ръчна проверка...")
+        new_ads = []
+        for url in Config.URLS:
+            new_ads.extend(process_url(url))
+        if new_ads:
+            for ad in new_ads:
+                msg = (
+                    f"🏠 <b>{ad['title']}</b>\n"
+                    f"💰 {ad['price']}\n"
+                    f"📅 {ad['date']}\n"
+                    f"🔗 <a href='{ad['link']}'>Виж обявата</a>"
+                )
+                send_telegram(msg)
+        else:
+            send_telegram("ℹ️ Няма намерени нови обяви.")
+
     return 'OK'
+
 
 def main():
     flask_thread = threading.Thread(
@@ -267,6 +303,7 @@ def main():
             logging.critical(f"Критична грешка: {e}\n{traceback.format_exc()}")
             send_telegram(f"❌ Критична грешка: {str(e)}")
             time.sleep(60)
+
 
 if __name__ == '__main__':
     main()
