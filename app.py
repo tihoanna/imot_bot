@@ -198,18 +198,28 @@ def process_url(base_url):
     return new_ads
 
 def main():
-    send_telegram("\uD83D\uDE80 Тестова проверка стартира.")
-    with ThreadPoolExecutor(max_workers=len(Config.URLS)) as executor:
-        results = executor.map(process_url, Config.URLS)
-        for ads in results:
-            for ad in ads:
-                msg = (
-                    f"\ud83c\udfe0 <b>{ad['title']}</b>\n"
-                    f"\ud83d\udcb0 {ad['price']}\n"
-                    f"\ud83d\uddd3 {ad['date']}\n"
-                    f"\ud83d\udd17 <a href='{ad['link']}'>Виж обявата</a>"
-                )
-                send_telegram(msg)
+    send_telegram("\u2708\ufe0f Ботът стартира успешно!")
+    while True:
+        try:
+            with ThreadPoolExecutor(max_workers=min(4, len(Config.URLS))) as executor:
+                results = executor.map(process_url, Config.URLS)
+                for ads in results:
+                    for ad in ads:
+                        msg = (
+                            f"\ud83c\udfe0 <b>{ad['title']}</b>\n"
+                            f"\ud83d\udcb0 {ad['price']}\n"
+                            f"\ud83d\udcc5 {ad['date']}\n"
+                            f"\ud83d\udd17 <a href='{ad['link']}'>Виж обявата</a>"
+                        )
+                        send_telegram(msg)
+            time.sleep(Config.CHECK_INTERVAL)
+        except KeyboardInterrupt:
+            send_telegram("\ud83d\uded1 Ботът е спрян ръчно")
+            sys.exit(0)
+        except Exception as e:
+            logging.critical(f"Критична грешка: {e}\n{traceback.format_exc()}")
+            send_telegram(f"\u274c Критична грешка: {str(e)}")
+            time.sleep(60)
 
 if __name__ == '__main__':
     main()
